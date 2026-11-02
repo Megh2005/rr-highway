@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kolkata Road Map</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+
+<style>
+  :root { --ink: #14202b; --muted: #5b6b79; --page-w: 281mm; --page-h: 197mm; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; color: var(--ink);
+    font: 13px/1.4 "Segoe UI", system-ui, Roboto, sans-serif;
+    -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+
+  /* ---------- Map ---------- */
+  #map { position: fixed; inset: 0; background: #e5e9ec; }
+  .leaflet-tile-pane { filter: saturate(.4) brightness(1.05) contrast(.95); } /* mute basemap so roads stand out */
+
+  /* ---------- Road-code text on the roads ---------- */
+  .road-label { overflow: visible; }
+  .road-label b {
+    display: block; width: max-content; white-space: nowrap; cursor: pointer;
+    font: 700 9px/9px "Segoe UI", Arial, sans-serif; letter-spacing: .2px;
+    text-shadow: -1px -1px 0 #fff, 1px -1px 0 #fff, -1px 1px 0 #fff, 1px 1px 0 #fff, 0 0 2px #fff;
+  }
+
+  /* ---------- Start (S) / end (E) markers ---------- */
+  .end-point span { display: block; width: 14px; height: 14px; border: 2px solid; border-radius: 50%; background: #fff;
+    font: 700 8px/10px "Segoe UI", Arial, sans-serif; text-align: center; cursor: pointer; }
+
+  /* ---------- Legend, north arrow, toolbar ---------- */
+  .box { background: rgba(255,255,255,.95); border: 1px solid #333; }
+  .legend { padding: 5px 8px 4px; font-size: 10px; line-height: 1.5; color: #111; }
+  .legend h4 { margin: 0 0 2px; padding-bottom: 2px; border-bottom: 1px solid #999; font-size: 10.5px; }
+  .legend div { white-space: nowrap; }
+  .legend i { display: inline-block; width: 18px; height: 4px; margin-right: 5px; vertical-align: middle; }
+  .north { padding: 2px 7px 0; text-align: center; font: 700 11px/1.1 "Segoe UI", sans-serif; }
+  .north svg { display: block; margin: 0 auto; }
+  .toolbar { display: flex; gap: 4px; align-items: center; padding: 4px; border-radius: 3px; }
+  .toolbar select, .toolbar button { font: inherit; font-size: 12px; padding: 3px 6px;
+    border: 1px solid #555; border-radius: 2px; background: #fff; color: var(--ink); }
+  .toolbar button { cursor: pointer; font-weight: 600; }
+  .toolbar .primary { background: var(--ink); color: #fff; }
+  .toolbar span { font-size: 11px; color: var(--muted); }
+  .toolbar :focus-visible { outline: 2px solid #2563eb; }
+
+  /* ---------- Click popup ---------- */
+  .leaflet-popup-content-wrapper { border-radius: 4px; padding-top: 0; }
+  .leaflet-popup-content { margin: 0 12px 10px; font-family: inherit; }
+  .info { min-width: 260px; }
+  .info h3 { margin: -1px -1px 8px; padding: 7px 10px; color: #fff; font-size: 15px; }
+  .info table { border-collapse: collapse; width: 100%; }
+  .info td { padding: 3px 0; vertical-align: top; font-size: 12.5px; }
+  .info td:first-child { color: var(--muted); padding-right: 10px; white-space: nowrap; }
+  .info .note { color: #b45309; }
+  .info a { color: #1d4ed8; }
+  .swatch { display: inline-block; width: 11px; height: 11px; border-radius: 2px; vertical-align: -1px; margin-right: 4px; }
+
+  /* ---------- Print mode: the map fills the chosen paper (class set by JS before printing) ---------- */
+  body.print-mode { height: auto; }
+  body.print-mode #map { position: relative; inset: auto; width: var(--page-w); height: var(--page-h); border: 1px solid #000; }
+  body.print-mode .toolbar, body.print-mode .leaflet-control-zoom { display: none !important; }
+</style>
+<style id="page-rule"></style>
+</head>
+
+<body>
+<div id="map" aria-label="Map of Kolkata roads R1 to R12"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+'use strict';
+
+/* =====================================================================
+   1. CONFIGURATION
+   ===================================================================== */
+const CONFIG = {
+  tileUrl: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+  attribution: 'Basemap © OpenStreetMap contributors',
+  // Routing servers are tried in this order (both are free OpenStreetMap-based services)
+  routers: [
+    'https://router.project-osrm.org/route/v1/driving/',
+    'https://routing.openstreetmap.de/routed-car/route/v1/driving/'
+  ],
+  labelPositions: [0.5],   // where the "R.." text sits along each road (0 = start, 1 = end); one entry = one label
+  fitPadding: [50, 50],
+  paperMm: { A4: [210, 297], A3: [297, 420], A2: [420, 594], Letter: [216, 279] },
+  printMarginMm: 6,
+  deviationRatio: 1.8                              // routed length / straight distance above this triggers a "check path" note
+};
+
+/* =====================================================================
+   2. ROAD DATA  –  edit here
+      sc / ec : start / end [lat, lng]
+      v       : OPTIONAL via-points [[lat, lng], ...] to force the path along the correct road
+   ===================================================================== */
+const ROADS = [
+  { c: 'R1',  n: 'E. M. Bypass',             kn: 'Navy blue',   k: '#1A365D', s: 'Ultadanga crossing',            sc: [22.591411, 88.393388], e: 'Kamalgazi crossing',           ec: [22.449438, 88.390871] },
+  { c: 'R2',  n: 'A. J. C. Bose Road',       kn: 'Red',         k: '#C53030', s: 'Hastings (Strand Rd. Junction)', sc: [22.571021, 88.343134], e: 'Sealdah Railway Station',      ec: [22.567775, 88.371010] },
+  { c: 'R3',  n: 'A. P. C. Road',            kn: 'Dark green',  k: '#22543D', s: 'Shyambazar 5 Point Crossing',   sc: [22.601965, 88.373761], e: 'Sealdah Railway Station',      ec: [22.567775, 88.371010] },
+  { c: 'R4',  n: 'Rashbehari Avenue',        kn: 'Orange',      k: '#C05621', s: 'Chetla',                        sc: [22.521088, 88.372279], e: 'Ruby Crossing',                ec: [22.513390, 88.401830] },
+  { c: 'R5',  n: 'Diamond Harbour Road',     kn: 'Purple',      k: '#6B46C1', s: 'Kidderpore',                    sc: [22.536323, 88.316654], e: 'Joka',                         ec: [22.453655, 88.302345] },
+  { c: 'R6',  n: 'B. T. Road',               kn: 'Teal',        k: '#0D9488', s: 'Shyambazar 5pt Crossing',       sc: [22.601965, 88.373761], e: 'Barrackpore',                  ec: [22.761660, 88.366193] },
+  { c: 'R7',  n: 'VIP Road',                 kn: 'Magenta',     k: '#9D174D', s: 'Ultadanga VIP Crossing',        sc: [22.591436, 88.393372], e: 'Airport Gate-1',               ec: [22.643113, 88.431225] },
+  { c: 'R8',  n: 'Park Street',              kn: 'Olive green', k: '#4D7C0F', s: 'Esplanade',                     sc: [22.555232, 88.350087], e: 'Park Circus 7 Point crossing', ec: [22.543295, 88.366006] },
+  { c: 'R9',  n: 'Jessore Road',             kn: 'Amber',       k: '#B45309', s: 'Shyambazar 5 Point Crossing',   sc: [22.601965, 88.373761], e: 'Airport Gate 1',               ec: [22.643113, 88.431225] },
+  { c: 'R10', n: 'Prince Anwar Shah Road',   kn: 'Blue',        k: '#2563EB', s: 'Mahanayak Uttam Kumar Metro',   sc: [22.494690, 88.345175], e: 'Kalikapur Connector',          ec: [22.504348, 88.400825] },
+  { c: 'R11', n: 'Gariahat Road',            kn: 'Brown',       k: '#78350F', s: 'Ballygunge Phari',              sc: [22.528291, 88.365932], e: 'Jadavpur Police Station',      ec: [22.502913, 88.367744] },
+  { c: 'R12', n: 'J. B. S. Haldane Avenue',  kn: 'Slate grey',  k: '#374151', s: 'Park Circus',                   sc: [22.541490, 88.384097], e: 'Dhapa',                        ec: [22.542827, 88.398010] }
+];
+
+/* =====================================================================
+   3. HELPERS
+   ===================================================================== */
+const $ = (selector) => document.querySelector(selector);
+const fmtCoord = (p) => p[0].toFixed(5) + ', ' + p[1].toFixed(5);
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Darker shade of a #RRGGBB colour – used for the road outline. */
+function darken(hex, factor = 0.6) {
+  return '#' + [1, 3, 5]
+    .map((i) => Math.round(parseInt(hex.substr(i, 2), 16) * factor).toString(16).padStart(2, '0'))
+    .join('');
+}
+
+/** Point located at fraction f (0..1) of the way along a polyline. */
+function pointAlong(path, f) {
+  const cumulative = [0];
+  for (let i = 1; i < path.length; i++) cumulative.push(cumulative[i - 1] + map.distance(path[i - 1], path[i]));
+  const target = cumulative[cumulative.length - 1] * f;
+  let i = 1;
+  while (i < cumulative.length - 1 && cumulative[i] < target) i++;
+  const u = (target - cumulative[i - 1]) / (cumulative[i] - cumulative[i - 1] || 1);
+  return [
+    path[i - 1][0] + (path[i][0] - path[i - 1][0]) * u,
+    path[i - 1][1] + (path[i][1] - path[i - 1][1]) * u
+  ];
+}
+
+/* =====================================================================
+   4. MAP + CONTROLS
+   ===================================================================== */
+const map = L.map('map', {
+  renderer: L.svg({ padding: 0.5 }),   // vector lines: sharp at any print size
+  zoomSnap: 0.25, zoomDelta: 0.5, minZoom: 9, maxZoom: 19
+});
+
+const basemap = L.tileLayer(CONFIG.tileUrl, {
+  maxZoom: 19, crossOrigin: true, attribution: CONFIG.attribution
+}).addTo(map);
+
+L.control.scale({ imperial: false, position: 'bottomright' }).addTo(map);
+
+/** Adds a custom control whose content is built by `build()`. */
+function addControl(position, build) {
+  const control = L.control({ position });
+  control.onAdd = () => {
+    const el = build();
+    L.DomEvent.disableClickPropagation(el);
+    return el;
+  };
+  return control.addTo(map);
+}
+
+addControl('bottomleft', () => {
+  const el = L.DomUtil.create('div', 'box legend');
+  el.innerHTML = '<h4>Legend</h4>' +
+    ROADS.map((r) => `<div><i style="background:${r.k}"></i><b>${r.c}</b> ${r.n}</div>`).join('');
+  return el;
+});
+
+addControl('topright', () => {
+  const el = L.DomUtil.create('div', 'box north');
+  el.innerHTML = '<svg width="18" height="26" viewBox="0 0 18 26"><path d="M9 1 16 24 9 18 2 24Z" fill="#111"/></svg>N';
+  return el;
+});
+
+addControl('topleft', () => {
+  const el = L.DomUtil.create('div', 'box toolbar');
+  el.innerHTML =
+    '<button id="btn-print" class="primary" title="Print or save as PDF">Print</button>' +
+    '<select id="paper" aria-label="Paper size">' + Object.keys(CONFIG.paperMm).map((p) => `<option>${p}</option>`).join('') + '</select>' +
+    '<select id="orient" aria-label="Orientation"><option value="l">Landscape</option><option value="p">Portrait</option></select>' +
+    '<button id="btn-fit" title="Fit all roads">Fit</button><span id="status">Routing…</span>';
+  return el;
+});
+
+/* =====================================================================
+   5. ROUTING  (follows the real street network between start and end)
+   ===================================================================== */
+async function fetchRoute(road) {
+  const waypoints = [road.sc, ...(road.v || []), road.ec];
+  const cacheKey = 'kolkata-rr:' + road.c + JSON.stringify(waypoints);
+
+  try { const cached = JSON.parse(localStorage.getItem(cacheKey)); if (cached) return cached; } catch (_) { /* no cache */ }
+
+  const query = waypoints.map((p) => p[1] + ',' + p[0]).join(';') + '?overview=full&geometries=geojson';
+  for (const server of CONFIG.routers) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const response = await fetch(server + query, { signal: AbortSignal.timeout(15000) });
+        const route = (await response.json()).routes[0];
+        const result = {
+          path: route.geometry.coordinates.map(([lng, lat]) => [lat, lng]),
+          distance: route.distance, duration: route.duration
+        };
+        try { localStorage.setItem(cacheKey, JSON.stringify(result)); } catch (_) { /* storage full/blocked */ }
+        return result;
+      } catch (_) { await sleep(800); }
+    }
+  }
+  throw new Error('Routing failed for ' + road.c);
+}
+
+/* =====================================================================
+   6. DRAWING
+   ===================================================================== */
+let selected = null;
+
+function setHighlight(road, on) {
+  if (!road.line) return;
+  road.line.setStyle({ weight: on ? 5 : 3 });
+  road.outline.setStyle({ weight: on ? 8 : 5.5 });
+}
+
+/** Draws one road: dark outline + coloured line + start/end dots + rotated "R.." text. */
+function drawRoad(road, path, isStraightLine) {
+  const group = road.group;
+  group.clearLayers();
+  road.path = path;
+  road.isStraightLine = isStraightLine;
+
+  const onClick = (layer) => layer.on('click', (e) => { L.DomEvent.stop(e); selectRoad(road, e.latlng); });
+  const stroke = { lineCap: 'round', lineJoin: 'round', opacity: 1 };
+
+  road.outline = onClick(L.polyline(path, { ...stroke, color: darken(road.k), weight: 5.5 }).addTo(group));
+  road.line    = onClick(L.polyline(path, { ...stroke, color: road.k, weight: 3 }).addTo(group));
+  road.line.bindTooltip(`${road.c} · ${road.n}`, { sticky: true });
+
+  // Start (S) and end (E) points: small lettered markers in the road's colour
+  [['Start', 'S', path[0], road.s], ['End', 'E', path[path.length - 1], road.e]].forEach(([label, letter, point, name]) => {
+    const icon = L.divIcon({
+      className: 'end-point', iconSize: [14, 14], iconAnchor: [7, 7],
+      html: `<span style="border-color:${road.k};color:${road.k}">${letter}</span>`
+    });
+    onClick(L.marker(point, { icon, zIndexOffset: 500 }).bindTooltip(`${road.c} ${label}: ${name}`).addTo(group));
+  });
+
+  CONFIG.labelPositions.forEach((f) => {
+    const a = map.latLngToLayerPoint(pointAlong(path, Math.max(f - 0.015, 0)));
+    const b = map.latLngToLayerPoint(pointAlong(path, Math.min(f + 0.015, 1)));
+    let angle = Math.atan2(b.y - a.y, b.x - a.x) * 180 / Math.PI;
+    if (angle > 90 || angle < -90) angle += 180;           // keep text upright
+    const icon = L.divIcon({
+      className: 'road-label', iconSize: [0, 0],
+      html: `<b style="color:${road.k};transform:translate(-50%,-50%) rotate(${angle}deg) translateY(-7px)">${road.c}</b>`
+    });
+    onClick(L.marker(pointAlong(path, f), { icon }).addTo(group));
+  });
+
+  if (selected === road) setHighlight(road, true);
+}
+
+function fitAll() {
+  map.fitBounds(L.latLngBounds(ROADS.flatMap((r) => r.path)), { padding: CONFIG.fitPadding });
+}
+
+/* =====================================================================
+   7. ROAD DETAILS (click)
+   ===================================================================== */
+function selectRoad(road, at) {
+  if (selected && selected !== road) setHighlight(selected, false);
+  selected = road;
+  setHighlight(road, true);
+  road.group.eachLayer((layer) => layer.bringToFront && layer.bringToFront());
+
+  const row = (label, value) => `<tr><td>${label}</td><td>${value}</td></tr>`;
+  const straight = map.distance(road.sc, road.ec);
+  const deviates = road.distance && road.distance / straight > CONFIG.deviationRatio;
+  const maps = `https://www.google.com/maps/dir/?api=1&origin=${road.sc}&destination=${road.ec}`;
+
+  L.popup({ maxWidth: 340 })
+    .setLatLng(at || pointAlong(road.path, 0.5))
+    .setContent(
+      `<div class="info"><h3 style="background:${road.k}">${road.c} · ${road.n}</h3><table>` +
+      row('Road code', `<b>${road.c}</b>`) +
+      row('Colour', `<span class="swatch" style="background:${road.k}"></span>${road.kn} (${road.k})`) +
+      row('Start', `${road.s}<br><small>${fmtCoord(road.sc)}</small>`) +
+      row('End', `${road.e}<br><small>${fmtCoord(road.ec)}</small>`) +
+      row('Length', road.distance ? (road.distance / 1000).toFixed(1) + ' km' : '–') +
+      row('Drive time', road.duration ? '≈ ' + Math.round(road.duration / 60) + ' min (no traffic)' : '–') +
+      row('Path', road.isStraightLine ? 'Straight line (routing unavailable)' : 'Routed along the street network') +
+      (deviates ? row('Check', '<span class="note">Routed path is much longer than the straight distance – verify the coordinates or add via-points.</span>') : '') +
+      `</table><a href="${maps}" target="_blank" rel="noopener">Open in Google Maps</a></div>`)
+    .openOn(map);
+}
+
+map.on('click', () => { if (selected) { setHighlight(selected, false); selected = null; } });
+
+/* =====================================================================
+   8. PRINT  (map fills the whole page on the chosen paper)
+   ===================================================================== */
+function applyPageSize() {
+  const [a, b] = CONFIG.paperMm[$('#paper').value];
+  const landscape = $('#orient').value === 'l';
+  const w = landscape ? b : a, h = landscape ? a : b, m = CONFIG.printMarginMm;
+  $('#page-rule').textContent = `@page { size: ${w}mm ${h}mm; margin: ${m}mm }`;
+  document.documentElement.style.setProperty('--page-w', (w - 2 * m) + 'mm');
+  document.documentElement.style.setProperty('--page-h', (h - 2 * m - 1) + 'mm');
+}
+
+function enterPrintMode() {
+  document.body.classList.add('print-mode');
+  applyPageSize(); map.closePopup(); map.invalidateSize(); fitAll();
+}
+function leavePrintMode() {
+  document.body.classList.remove('print-mode');
+  map.invalidateSize();
+}
+
+$('#btn-print').onclick = async () => {
+  const button = $('#btn-print');
+  enterPrintMode();
+  button.textContent = 'Preparing…';
+  await new Promise((resolve) => { basemap.once('load', resolve); setTimeout(resolve, 2500); }); // wait for tiles
+  await sleep(500);
+  button.textContent = 'Print';
+  window.print();
+};
+window.addEventListener('beforeprint', () => { if (!document.body.classList.contains('print-mode')) enterPrintMode(); });
+window.addEventListener('afterprint', leavePrintMode);
+$('#paper').onchange = $('#orient').onchange = applyPageSize;
+$('#btn-fit').onclick = fitAll;
+applyPageSize();
+
+/* =====================================================================
+   9. START-UP  (roads are routed one at a time so the free servers are not overloaded)
+   ===================================================================== */
+ROADS.forEach((r) => { r.group = L.featureGroup().addTo(map); r.path = [r.sc, r.ec]; });
+fitAll();
+
+(async function loadRoads() {
+  let done = 0;
+  for (const road of ROADS) {
+    try {
+      const route = await fetchRoute(road);
+      road.distance = route.distance; road.duration = route.duration;
+      drawRoad(road, route.path, false);
+    } catch (_) {
+      drawRoad(road, [road.sc, road.ec], true);
+    }
+    done++;
+    $('#status').textContent = done < ROADS.length ? `Routing ${done}/${ROADS.length}` :
+      (ROADS.every((r) => !r.isStraightLine) ? '' : 'Routing failed for some roads – check internet');
+    if (!selected && (done % 4 === 0 || done === ROADS.length)) fitAll();
+  }
+})();
+</script>
+</body>
+</html>
